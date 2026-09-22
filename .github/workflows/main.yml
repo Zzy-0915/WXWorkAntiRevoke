@@ -7,16 +7,18 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-13
 
     steps:
     - name: Checkout Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Setup Theos
+    - name: Setup Theos and SDKs
       run: |
         git clone --recursive https://github.com/theos/theos.git $HOME/theos
         echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+        # 补全 iOS SDK 依赖，防止 make 提示 SDK missing
+        git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
 
     - name: Build Package
       run: |
@@ -24,7 +26,7 @@ jobs:
         make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: WXWorkAntiRevoke-Rootless
         path: |
