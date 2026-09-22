@@ -13,8 +13,12 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Setup Theos and SDKs
+    - name: Setup Theos, SDKs, and Dependencies
       run: |
+        # 安装 iOS 伪签名工具 ldid
+        brew install ldid
+        
+        # 配置 Theos 环境
         git clone --recursive https://github.com/theos/theos.git $HOME/theos
         echo "THEOS=$HOME/theos" >> $GITHUB_ENV
         rm -rf $HOME/theos/sdks
