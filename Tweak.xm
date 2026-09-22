@@ -5,9 +5,14 @@
 static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
 
 // ==========================================
-// 1. 给消息体追加 [已撤回] 的红色提示尾巴
+// 1. 核心模型层：防清理 + 红色尾巴
 // ==========================================
 %hook WWKMessage
+
+// 【极其关键：补回这句】强行骗过 UI，绝不让气泡变成“撤回了一条消息”的系统提示
+- (BOOL)isRevoked {
+    return NO;
+}
 
 // 拦截纯文本读取
 - (NSString *)text {
@@ -15,8 +20,8 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
     NSNumber *isRevoked = objc_getAssociatedObject(self, kIsAntiRevokedKey);
     // 如果被打上了撤回标记，就在原文后面追加提示
     if (isRevoked && [isRevoked boolValue]) {
-        if (orig && ![orig containsString:@"[已撤回]"]) {
-            return [orig stringByAppendingString:@" [已撤回]"];
+        if (orig && ![orig containsString:@"[对方已撤回]"]) {
+            return [orig stringByAppendingString:@" [对方已撤回]"];
         }
     }
     return orig;
@@ -27,7 +32,7 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
     NSAttributedString *orig = %orig;
     NSNumber *isRevoked = objc_getAssociatedObject(self, kIsAntiRevokedKey);
     if (isRevoked && [isRevoked boolValue]) {
-        if (orig && ![[orig string] containsString:@"[已撤回]"]) {
+        if (orig && ![[orig string] containsString:@"[对方已撤回]"]) {
             NSMutableAttributedString *mut = [orig mutableCopy];
             NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@" [对方已撤回]" 
                                                                       attributes:@{ NSForegroundColorAttributeName : [UIColor redColor] }];
@@ -41,17 +46,16 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
 %end
 
 // ==========================================
-// 2. 拦截撤回动作，打上标记，并阻止 UI 删消息
+// 2. 界面控制层：打标记 + 拦截系统删气泡
 // ==========================================
 %hook WWKConversationNewViewController
 
 - (void)revokeMessage:(id)msg {
-    // 1. 抓到即将被撤回的消息，给它打上“已撤回”标记
+    // 打上标记
     if ([msg isKindOfClass:%c(WWKMessage)]) {
         objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    
-    // 2. 强制刷新当前聊天列表，让追加的红色 [已撤回] 展现出来 (加入 id 强转修复编译报错)
+    // 强制刷新，触发 attrText 更新红字
     UITableView *tv = [(id)self valueForKey:@"tableView"];
     if ([tv isKindOfClass:[UITableView class]]) {
         [tv reloadData];
@@ -80,7 +84,19 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
 
 // 拦截顶部的撤回弹窗警告（让它闭嘴）
 - (void)revokeMessageWithFirstAlert:(id)arg1 {
-    // 留空，不执行任何弹窗
+    // 留空即可
+}
+
+%end
+
+// ==========================================
+// 3. 顺手保护引用消息
+// ==========================================
+%hook WWKConversationQuoteBubbleView
+
+// 防止你引用的消息被别人撤回后显示异常
+- (BOOL)quotedRevoked {
+    return NO;
 }
 
 %end
