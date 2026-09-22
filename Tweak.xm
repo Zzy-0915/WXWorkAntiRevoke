@@ -1,67 +1,32 @@
 #import <UIKit/UIKit.h>
 
 // ==========================================
-// 企业微信 5.0.11 (Rootless) 专版防撤回
+// 企业微信 5.0.11 防闪退·纯净防撤回
 // ==========================================
 
-// 1. 强行干涉底层消息体的解析与呈现状态
 %hook WWKMessage
 
-// 只要底层来问“这条消息是不是被撤回了”，直接回答 NO
+// 1. 核心逻辑：系统无论怎么查，我们都告诉它“这条消息没有被撤回”
 - (BOOL)isRevoked {
     return NO;
 }
 
-// 拦截撤回消息的协议解析，遇到撤回包直接丢弃
+// 2. 修复闪退：让系统正常解析撤回数据包，绝对不能返回 nil！
+// 这样进入聊天界面时，系统数组就不会因为拿到空对象而崩溃闪退。
 - (id)p_parseRevokeMessage:(id)arg1 {
-    NSLog(@"[AntiRevoke] 拦截到底层撤回解析包，已丢弃");
-    return nil;
+    id msg = %orig; // 让系统自己处理，保证数据链条完整
+    NSLog(@"[AntiRevoke] 收到撤回包，已安全放行解析，通过 isRevoked 欺骗界面");
+    return msg;
 }
 
 %end
 
-// 2. 强行屏蔽聊天视图控制器的撤回刷新逻辑
-%hook WWKConversationNewViewController
+// 3. 顺手保护一下“引用消息”
+// 如果别人撤回了被你引用的消息，保证你这里的引用框依然正常显示
+%hook WWKConversationQuoteBubbleView
 
-// 拦截管理员撤回
-- (void)managerRevokeMessage:(id)arg1 {
-    NSLog(@"[AntiRevoke] 拦截到管理员撤回指令");
-}
-
-// 拦截单条历史撤回
-- (void)revokeHistoryMessage:(id)arg1 {
-    NSLog(@"[AntiRevoke] 拦截到历史消息撤回指令");
-}
-
-// 拦截普通消息撤回
-- (void)revokeMessage:(id)arg1 {
-    NSLog(@"[AntiRevoke] 拦截到实时消息撤回指令");
-}
-
-// 拦截撤回弹窗警告
-- (void)revokeMessageWithFirstAlert:(id)arg1 {
-    NSLog(@"[AntiRevoke] 拦截到撤回弹窗警告");
-}
-
-%end
-
-// 3. 强行拦截并隐藏由于其他原因强行渲染出来的红字撤回提示标签
-%hook UILabel
-
-- (void)setAttributedText:(NSAttributedString *)text {
-    if (text && [text.string containsString:@"撤回了一条消息"]) {
-        NSLog(@"[AntiRevoke] 拦截到 UI 上即将显示撤回红字，已强制消隐");
-        return; // 直接丢弃这个富文本，不让它显示出来
-    }
-    %orig;
-}
-
-- (void)setText:(NSString *)text {
-    if (text && [text containsString:@"撤回了一条消息"]) {
-        NSLog(@"[AntiRevoke] 拦截到 UI 上即将显示撤回文字，已强制消隐");
-        return; // 直接丢弃文字
-    }
-    %orig;
+- (BOOL)quotedRevoked {
+    return NO;
 }
 
 %end
