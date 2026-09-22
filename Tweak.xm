@@ -1,97 +1,51 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
 
-@interface CMessageWrap : NSObject
-@property (nonatomic, assign) NSUInteger m_uiMessageType; // 1:文字, 3:图片, 43:视频, 47:表情/动画
-@property (nonatomic, retain) NSString *m_nsContent;      // 消息主体文本
-@property (nonatomic, assign) NSUInteger m_uiMesLocalID;  // 本地消息ID
-@property (nonatomic, retain) NSString *m_nsFromUsr;     // 发送者
-@property (nonatomic, retain) NSString *m_nsToUsr;       // 接收者
-@property (nonatomic, assign) BOOL m_isAntiRevoked;      // 标记是否被防撤回拦截
-@end
+// ==========================================
+// 强化版防撤回逻辑 (尝试覆盖更多可能的类名)
+// ==========================================
 
-@interface CMessageMgr : NSObject
-- (void)UpdateMsgContent:(NSString *)fromUser MsgWrap:(CMessageWrap *)msgWrap;
-- (void)DelMsg:(NSString *)fromUser MsgList:(NSArray *)msgList DelAll:(BOOL)delAll;
-@end
-
-// 记录已被撤回的本地消息 ID 集合
-static NSMutableSet<NSNumber *> *g_antiRevokeMsgIDs = nil;
-
+// 1. 尝试 Hook 经典的 CMessageMgr
 %hook CMessageMgr
-
-// 拦截系统下发的撤回指令
-- (void)onRevokeMsg:(CMessageWrap *)msgWrap {
-    if (!msgWrap) {
-        %orig;
-        return;
-    }
-
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        g_antiRevokeMsgIDs = [[NSMutableSet alloc] init];
-    });
-
-    NSNumber *msgID = @(msgWrap.m_uiMesLocalID);
-
-    // 避免重复拦截逻辑
-    if ([g_antiRevokeMsgIDs containsObject:msgID]) {
-        return;
-    }
-    [g_antiRevokeMsgIDs addObject:msgID];
-
-    msgWrap.m_isAntiRevoked = YES;
-    NSString *tagText = @" [已撤回]";
-
-    // 根据消息类型处理（文字、图片、视频、表情）
-    switch (msgWrap.m_uiMessageType) {
-        case 1: { // 文本消息
-            if (msgWrap.m_nsContent && ![msgWrap.m_nsContent containsString:tagText]) {
-                msgWrap.m_nsContent = [msgWrap.m_nsContent stringByAppendingString:tagText];
-            }
-            break;
-        }
-        case 3:   // 图片消息
-        case 43:  // 视频消息
-        case 47:  // 表情/Sticker
-        default: {
-            // 非文本富媒体保留缓存文件，并在消息描述处附带撤回标记
-            if (msgWrap.m_nsContent == nil || msgWrap.m_nsContent.length == 0) {
-                msgWrap.m_nsContent = tagText;
-            } else if (![msgWrap.m_nsContent containsString:tagText]) {
-                msgWrap.m_nsContent = [msgWrap.m_nsContent stringByAppendingString:tagText];
-            }
-            break;
-        }
-    }
-
-    // 强行刷新内存与本地数据库中的消息文本，使其原样留在聊天界面
-    [self UpdateMsgContent:msgWrap.m_nsFromUsr MsgWrap:msgWrap];
-
-    // 拦截并终止原生的本地擦除与UI删除方法
-    return;
+- (void)onRevokeMsg:(id)msgWrap {
+    // 拦截撤回指令，不调用 %orig
+    NSLog(@"[AntiRevoke] 拦截到 CMessageMgr 撤回指令: %@", msgWrap);
 }
-
-// 拦截UI层消息删除指令
-- (void)DelMsg:(NSString *)fromUser MsgList:(NSArray *)msgList DelAll:(BOOL)delAll {
-    NSMutableArray *filteredList = [NSMutableArray array];
-    for (CMessageWrap *msg in msgList) {
-        if ([g_antiRevokeMsgIDs containsObject:@(msg.m_uiMesLocalID)]) {
-            // 阻断撤回引发的擦除
-            continue;
-        }
-        [filteredList addObject:msg];
-    }
-    if (filteredList.count > 0) {
-        %orig(fromUser, filteredList, delAll);
-    }
+- (void)DelMsg:(id)arg1 MsgList:(id)arg2 DelAll:(BOOL)arg3 {
+    // 拦截批量删除（可能是撤回引起的清理）
+    NSLog(@"[AntiRevoke] 拦截到 CMessageMgr 删除指令");
+    // 注释掉 %orig 阻止删除，但这可能影响正常的删除功能，作为测试先保留观察
+    // %orig; 
 }
-
 %end
 
-// 动态分类，给 CMessageWrap 绑定 m_isAntiRevoked 属性
-%hook CMessageWrap
-
-%property (nonatomic, assign) BOOL m_isAntiRevoked;
-
+// 2. 尝试 Hook 可能的企业微信特有类 (WWKMessageService / WWKMessageMgr 等)
+%hook WWKMessageService
+- (void)onRevokeMessage:(id)message {
+    NSLog(@"[AntiRevoke] 拦截到 WWKMessageService 撤回指令");
+    // 不调用 %orig 拦截撤回
+}
 %end
+
+%hook WWKConversationMessageMgr
+- (void)onRevokeMessage:(id)message {
+    NSLog(@"[AntiRevoke] 拦截到 WWKConversationMessageMgr 撤回指令");
+}
+%end
+
+// 3. 拦截向聊天界面插入“撤回了一条消息”的系统提示消息
+// 企业微信通常会调用某个 insertSystemMessage 类似的方法
+%hook WWKMessageListController
+- (void)addMessageNode:(id)node {
+    // 简单粗暴：如果节点包含“撤回了”，就不添加到 UI 上
+    NSString *nodeDesc = [NSString stringWithFormat:@"%@", node];
+    if ([nodeDesc containsString:@"撤回了"]) {
+        NSLog(@"[AntiRevoke] 拦截到 UI 撤回提示插入");
+        return; 
+    }
+    %orig;
+}
+%end
+
+%ctor {
+    NSLog(@"[AntiRevoke] 插件已成功加载到企业微信进程！");
+}
