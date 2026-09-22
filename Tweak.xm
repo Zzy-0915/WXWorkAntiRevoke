@@ -1,102 +1,102 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// 声明一个内存地址用于动态绑定撤回标记
-static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
-
 // ==========================================
-// 1. 核心模型层：防清理 + 红色尾巴
+// 全局记忆保险箱：用于抢救被底层删掉的原始消息
 // ==========================================
-%hook WWKMessage
+static NSCache *g_originalContentCache = nil;
+static NSMutableSet *g_revokedKeys = nil;
 
-// 【极其关键：补回这句】强行骗过 UI，绝不让气泡变成“撤回了一条消息”的系统提示
-- (BOOL)isRevoked {
-    return NO;
+%ctor {
+    g_originalContentCache = [[NSCache alloc] init];
+    g_originalContentCache.countLimit = 2000; // 最多记忆当前 2000 条消息
+    g_revokedKeys = [[NSMutableSet alloc] init];
 }
 
-// 拦截纯文本读取
-- (NSString *)text {
-    NSString *orig = %orig;
-    NSNumber *isRevoked = objc_getAssociatedObject(self, kIsAntiRevokedKey);
-    // 如果被打上了撤回标记，就在原文后面追加提示
-    if (isRevoked && [isRevoked boolValue]) {
-        if (orig && ![orig containsString:@"[对方已撤回]"]) {
-            return [orig stringByAppendingString:@" [对方已撤回]"];
-        }
-    }
-    return orig;
-}
-
-// 拦截富文本读取（带颜色和表情的文本）
-- (NSAttributedString *)attrText {
-    NSAttributedString *orig = %orig;
-    NSNumber *isRevoked = objc_getAssociatedObject(self, kIsAntiRevokedKey);
-    if (isRevoked && [isRevoked boolValue]) {
-        if (orig && ![[orig string] containsString:@"[对方已撤回]"]) {
-            NSMutableAttributedString *mut = [orig mutableCopy];
-            NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@" [对方已撤回]" 
-                                                                      attributes:@{ NSForegroundColorAttributeName : [UIColor redColor] }];
-            [mut appendAttributedString:tag];
-            return mut;
-        }
-    }
-    return orig;
-}
-
-%end
-
 // ==========================================
-// 2. 界面控制层：打标记 + 拦截系统删气泡
+// 1. 拦截撤回动作：记录谁被撤回了，并阻止 UI 删除
 // ==========================================
 %hook WWKConversationNewViewController
 
 - (void)revokeMessage:(id)msg {
-    // 打上标记
     if ([msg isKindOfClass:%c(WWKMessage)]) {
-        objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id key = [msg valueForKey:@"msgKey"];
+        if (key) [g_revokedKeys addObject:key];
     }
-    // 强制刷新，触发 attrText 更新红字
+    // 强制刷新界面，触发文本替换，决不执行 %orig 导致气泡消失
     UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) {
-        [tv reloadData];
-    }
+    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
 }
 
 - (void)revokeHistoryMessage:(id)msg {
     if ([msg isKindOfClass:%c(WWKMessage)]) {
-        objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id key = [msg valueForKey:@"msgKey"];
+        if (key) [g_revokedKeys addObject:key];
     }
     UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) {
-        [tv reloadData];
-    }
+    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
 }
 
 - (void)managerRevokeMessage:(id)msg {
     if ([msg isKindOfClass:%c(WWKMessage)]) {
-        objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id key = [msg valueForKey:@"msgKey"];
+        if (key) [g_revokedKeys addObject:key];
     }
     UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) {
-        [tv reloadData];
-    }
+    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
 }
 
-// 拦截顶部的撤回弹窗警告（让它闭嘴）
-- (void)revokeMessageWithFirstAlert:(id)arg1 {
-    // 留空即可
-}
+// 屏蔽顶部的撤回弹窗警告
+- (void)revokeMessageWithFirstAlert:(id)arg1 {}
 
 %end
 
 // ==========================================
-// 3. 顺手保护引用消息
+// 2. 文本渲染层：偷天换日，从保险箱恢复数据
 // ==========================================
-%hook WWKConversationQuoteBubbleView
+%hook WWKMessage
 
-// 防止你引用的消息被别人撤回后显示异常
-- (BOOL)quotedRevoked {
-    return NO;
+- (NSAttributedString *)attrText {
+    NSAttributedString *orig = %orig;
+    id key = [self valueForKey:@"msgKey"];
+    if (!key) return orig;
+
+    // 核心判定：这条消息是否收到了撤回指令，或者底层文本已经被改成了撤回提示？
+    BOOL isRevoked = [g_revokedKeys containsObject:key] || [[orig string] containsString:@"撤回了一条消息"];
+
+    if (isRevoked) {
+        // 从我们的全局保险箱里捞出原文！
+        NSAttributedString *cachedOrig = [g_originalContentCache objectForKey:key];
+        if (cachedOrig) {
+            NSMutableAttributedString *mut = [cachedOrig mutableCopy];
+            // 在原文尾部强行挂上红色提示
+            NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@" [对方已撤回]" 
+                                                                      attributes:@{ NSForegroundColorAttributeName : [UIColor redColor] }];
+            [mut appendAttributedString:tag];
+            return mut; // 完美替换底层丢失的数据！
+        }
+    } else if (orig.length > 0) {
+        // 如果是正常消息，趁底层还没删，赶紧存进保险箱
+        [g_originalContentCache setObject:orig forKey:key];
+    }
+
+    return orig;
+}
+
+- (NSString *)text {
+    NSString *orig = %orig;
+    id key = [self valueForKey:@"msgKey"];
+    if (!key) return orig;
+
+    BOOL isRevoked = [g_revokedKeys containsObject:key] || [orig containsString:@"撤回了一条消息"];
+
+    if (isRevoked) {
+        NSAttributedString *cachedAttr = [g_originalContentCache objectForKey:key];
+        if (cachedAttr) {
+            return [[cachedAttr string] stringByAppendingString:@" [对方已撤回]"];
+        }
+    }
+    return orig;
 }
 
 %end
