@@ -1,0 +1,32 @@
+name: Build AntiRevoke Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Setup Theos
+      run: |
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+    - name: Build Package
+      run: |
+        export THEOS=$HOME/theos
+        make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: WXWorkAntiRevoke-Rootless
+        path: |
+          .theos/obj/debug/*.dylib
+          packages/*.deb
