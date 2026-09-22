@@ -1,51 +1,37 @@
 #import <UIKit/UIKit.h>
 
-// ==========================================
-// 强化版防撤回逻辑 (尝试覆盖更多可能的类名)
-// ==========================================
-
-// 1. 尝试 Hook 经典的 CMessageMgr
-%hook CMessageMgr
-- (void)onRevokeMsg:(id)msgWrap {
-    // 拦截撤回指令，不调用 %orig
-    NSLog(@"[AntiRevoke] 拦截到 CMessageMgr 撤回指令: %@", msgWrap);
-}
-- (void)DelMsg:(id)arg1 MsgList:(id)arg2 DelAll:(BOOL)arg3 {
-    // 拦截批量删除（可能是撤回引起的清理）
-    NSLog(@"[AntiRevoke] 拦截到 CMessageMgr 删除指令");
-    // 注释掉 %orig 阻止删除，但这可能影响正常的删除功能，作为测试先保留观察
-    // %orig; 
-}
-%end
-
-// 2. 尝试 Hook 可能的企业微信特有类 (WWKMessageService / WWKMessageMgr 等)
+// 1. 拦截企业微信消息同步与撤回服务
 %hook WWKMessageService
-- (void)onRevokeMessage:(id)message {
-    NSLog(@"[AntiRevoke] 拦截到 WWKMessageService 撤回指令");
-    // 不调用 %orig 拦截撤回
+- (void)onRevokeMessage:(id)arg1 {
+    NSLog(@"[AntiRevoke] 已拦截单条消息撤回: %@", arg1);
+}
+- (void)onRevokeMessages:(id)arg1 {
+    NSLog(@"[AntiRevoke] 已拦截多条消息撤回: %@", arg1);
 }
 %end
 
+// 2. 拦截会话管理器中的撤回动作
 %hook WWKConversationMessageMgr
-- (void)onRevokeMessage:(id)message {
-    NSLog(@"[AntiRevoke] 拦截到 WWKConversationMessageMgr 撤回指令");
+- (void)onRevokeMessage:(id)arg1 {
+    NSLog(@"[AntiRevoke] 已拦截会话管理器撤回: %@", arg1);
+}
+- (void)onRevokeMessages:(id)arg1 {
+    NSLog(@"[AntiRevoke] 已拦截会话管理器批量撤回: %@", arg1);
 }
 %end
 
-// 3. 拦截向聊天界面插入“撤回了一条消息”的系统提示消息
-// 企业微信通常会调用某个 insertSystemMessage 类似的方法
-%hook WWKMessageListController
-- (void)addMessageNode:(id)node {
-    // 简单粗暴：如果节点包含“撤回了”，就不添加到 UI 上
-    NSString *nodeDesc = [NSString stringWithFormat:@"%@", node];
-    if ([nodeDesc containsString:@"撤回了"]) {
-        NSLog(@"[AntiRevoke] 拦截到 UI 撤回提示插入");
-        return; 
-    }
-    %orig;
+// 3. 强行篡改核心消息的“撤回状态”属性，让 UI 界面继续强行显示原消息
+%hook WWKMessage
+- (BOOL)isRevoked {
+    // 强制告诉界面：这条消息没有被撤回
+    return NO;
+}
+- (void)setRevoked:(BOOL)arg1 {
+    NSLog(@"[AntiRevoke] 拦截到尝试修改撤回状态，已阻止！");
 }
 %end
 
+// 4. 插件加载完成时的检测探针
 %ctor {
-    NSLog(@"[AntiRevoke] 插件已成功加载到企业微信进程！");
+    NSLog(@"[AntiRevoke] 🚀 企业微信 WWK 专版防撤回插件已成功加载！");
 }
