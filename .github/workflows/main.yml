@@ -20,6 +20,25 @@ jobs:
         rm -rf $HOME/theos/sdks
         git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
 
+    - name: Fix Makefile and Create Control
+      run: |
+        # 自动将 THEOS_MAKEFILE_PATH 纠正为 THEOS_MAKE_PATH
+        sed -i '' 's/THEOS_MAKEFILE_PATH/THEOS_MAKE_PATH/g' Makefile
+        
+        # 自动生成打包必需的 control 信息文件
+        if [ ! -f "control" ]; then
+          cat << 'EOF' > control
+Package: com.zzy.wxworkantirevoke
+Name: WXWorkAntiRevoke
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 企业微信防撤回插件 (iOS 17 Rootless)
+Maintainer: Zzy
+Author: Zzy
+Section: Tweaks
+EOF
+        fi
+
     - name: Build Package
       run: |
         export THEOS=$HOME/theos
