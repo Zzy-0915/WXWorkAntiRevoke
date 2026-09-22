@@ -51,10 +51,8 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
         objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     
-    // 2. 绝不能调用 %orig，防止系统把气泡从屏幕上删掉
-    
-    // 3. 强制刷新当前聊天列表，让追加的红色 [已撤回] 展现出来
-    UITableView *tv = [self valueForKey:@"tableView"];
+    // 2. 强制刷新当前聊天列表，让追加的红色 [已撤回] 展现出来 (加入 id 强转修复编译报错)
+    UITableView *tv = [(id)self valueForKey:@"tableView"];
     if ([tv isKindOfClass:[UITableView class]]) {
         [tv reloadData];
     }
@@ -64,16 +62,20 @@ static const void *kIsAntiRevokedKey = &kIsAntiRevokedKey;
     if ([msg isKindOfClass:%c(WWKMessage)]) {
         objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    UITableView *tv = [self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
+    UITableView *tv = [(id)self valueForKey:@"tableView"];
+    if ([tv isKindOfClass:[UITableView class]]) {
+        [tv reloadData];
+    }
 }
 
 - (void)managerRevokeMessage:(id)msg {
     if ([msg isKindOfClass:%c(WWKMessage)]) {
         objc_setAssociatedObject(msg, kIsAntiRevokedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    UITableView *tv = [self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
+    UITableView *tv = [(id)self valueForKey:@"tableView"];
+    if ([tv isKindOfClass:[UITableView class]]) {
+        [tv reloadData];
+    }
 }
 
 // 拦截顶部的撤回弹窗警告（让它闭嘴）
