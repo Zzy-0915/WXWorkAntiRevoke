@@ -1,6 +1,11 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// 声明底层接口，消除编译器的“未识别选择器”错误
+@interface WWKMessage : NSObject
+- (id)cleanItemConversationKey;
+@end
+
 // ==========================================
 // 全局会话回溯中心：按会话记录最近消息文本
 // ==========================================
@@ -42,9 +47,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStac
     @synchronized (s_convStacks) {
         NSMutableArray *list = s_convStacks[convKey];
         if (list && list.count > 0) {
-            NSString *last = [list lastObject];
-            // 取出后不立即删除，保留作为历史备查
-            return last;
+            return [list lastObject];
         }
     }
     return nil;
@@ -81,7 +84,9 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStac
 // 拦截纯文本读取
 - (NSString *)text {
     NSString *orig = %orig;
-    id convId = [(id)self cleanItemConversationKey];
+    
+    // 改用 valueForKey 安全提取，彻底杜绝编译报错
+    id convId = [(id)self valueForKey:@"cleanItemConversationKey"];
     NSString *convKey = convId ? [NSString stringWithFormat:@"%@", convId] : @"default";
 
     // 正常消息：自动归档到该会话的流水账中
@@ -92,9 +97,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStac
 
     // 遇到已被撤回的消息：提取原文还原
     if (orig && [orig containsString:@"撤回了一条消息"]) {
-        // 1. 优先尝试提取解析前绑定的内容
         NSString *saved = objc_getAssociatedObject(self, "kPreRevokeContent");
-        // 2. 否则从该会话的最近消息回溯栈提取
         if (!saved || saved.length == 0) {
             saved = [WWKRevokeMemoryCenter popLatestMessageInConv:convKey];
         }
@@ -111,7 +114,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStac
     NSAttributedString *orig = %orig;
     if (!orig || orig.length == 0) return orig;
 
-    id convId = [(id)self cleanItemConversationKey];
+    id convId = [(id)self valueForKey:@"cleanItemConversationKey"];
     NSString *convKey = convId ? [NSString stringWithFormat:@"%@", convId] : @"default";
 
     // 正常富文本消息入库
