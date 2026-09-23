@@ -1,113 +1,83 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+
+// 给我们拦截下来的撤回包打个隐藏标签
+static const void *kFakeRevokeTag = &kFakeRevokeTag;
 
 // ==========================================
-// 企业微信 5.0.11 - 双轨记忆防撤回 (完美防闪退版)
+// 企业微信 5.0.11 - 狸猫换太子 (防闪退 + 保原文)
 // ==========================================
-
-// 建立两个全局保险箱，分别储存纯文本和带表情的富文本
-static NSCache *g_textCache = nil;
-static NSCache *g_attrTextCache = nil;
-
-%ctor {
-    g_textCache = [[NSCache alloc] init];
-    g_textCache.countLimit = 5000; // 记忆最近 5000 条消息
-    
-    g_attrTextCache = [[NSCache alloc] init];
-    g_attrTextCache.countLimit = 5000;
-}
-
-// 安全获取消息唯一 ID 的辅助函数
-static NSString* safeKey(id msg) {
-    if ([msg respondsToSelector:@selector(msgKey)]) {
-        id key = [msg valueForKey:@"msgKey"];
-        if (key) return [NSString stringWithFormat:@"%@", key];
-    }
-    return nil;
-}
 
 %hook WWKMessage
 
-// 强行把气泡维持在正常形态，不让它变成灰色的系统提示框
+// 1. 拦截解析过程：正常解析防闪退，打上标签备用
+- (id)p_parseRevokeMessage:(id)arg1 {
+    id msg = %orig; // 必须调用原方法，生成合法的对象，100% 杜绝进群闪退
+    if (msg) {
+        // 给它盖个戳，证明它是被我们“截获的间谍”
+        objc_setAssociatedObject(msg, kFakeRevokeTag, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    NSLog(@"[AntiRevoke] 成功拦截撤回数据包！");
+    return msg;
+}
+
+// 2. 核心欺骗：篡改消息类型！
+// 当业务层来问“你是什么消息”时，如果它是间谍，我们强行回答“我是普通文本”！
+// 这样业务层就不会去执行“抹除原消息”的数据库动作了，原话就被永久保住了！
+- (int)type {
+    NSNumber *isFake = objc_getAssociatedObject(self, kFakeRevokeTag);
+    if (isFake && [isFake boolValue]) {
+        return 1; // 1 通常代表普通的 Text 文本消息
+    }
+    return %orig;
+}
+
+- (long long)messageType {
+    NSNumber *isFake = objc_getAssociatedObject(self, kFakeRevokeTag);
+    if (isFake && [isFake boolValue]) {
+        return 1;
+    }
+    return %orig;
+}
+
+// 3. 完美展现：把这个撤回指令，变成屏幕上的红色警告气泡！
+- (NSString *)text {
+    NSNumber *isFake = objc_getAssociatedObject(self, kFakeRevokeTag);
+    if (isFake && [isFake boolValue]) {
+        return @"[已拦截对方撤回]"; // 让撤回指令直接现原形
+    }
+    return %orig;
+}
+
+- (NSAttributedString *)attrText {
+    NSNumber *isFake = objc_getAssociatedObject(self, kFakeRevokeTag);
+    if (isFake && [isFake boolValue]) {
+        return [[NSAttributedString alloc] initWithString:@"🚫 [已拦截对方撤回操作]" 
+                                               attributes:@{NSForegroundColorAttributeName: [UIColor redColor]}];
+    }
+    return %orig;
+}
+
+// 4. 全局保底：所有消息均报告未撤回
 - (BOOL)isRevoked {
+    return NO;
+}
+
+- (BOOL)wwkfs_isInvalidateMessage {
+    NSNumber *isFake = objc_getAssociatedObject(self, kFakeRevokeTag);
+    if (isFake && [isFake boolValue]) {
+        return NO;
+    }
+    return %orig;
+}
+
+%end
+
+// ==========================================
+// 保护引用消息框不崩溃
+// ==========================================
+%hook WWKConversationQuoteBubbleView
+- (BOOL)quotedRevoked { 
     return NO; 
 }
-
-// 1. 拦截富文本渲染（带颜色的文字、表情等）
-- (NSAttributedString *)attrText {
-    NSAttributedString *orig = %orig;
-    if (!orig) return orig;
-    
-    NSString *key = safeKey(self);
-    if (!key) return orig;
-
-    // 当底层数据库把内容改成了“撤回”提示时
-    if ([orig.string containsString:@"撤回了一条消息"]) {
-        // 从保险箱里捞出被删除前的原文！
-        NSAttributedString *cached = [g_attrTextCache objectForKey:key];
-        if (cached) {
-            NSMutableAttributedString *mut = [cached mutableCopy];
-            // 在原文屁股后面贴上红色标签
-            NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@" [已拦截对方撤回]" 
-                                                                      attributes:@{NSForegroundColorAttributeName: [UIColor redColor]}];
-            [mut appendAttributedString:tag];
-            return mut; // 偷天换日，完美恢复！
-        }
-        // 如果 App 重启过，保险箱清空了，就给个保底提示
-        return [[NSAttributedString alloc] initWithString:@"[已拦截对方撤回消息]" 
-                                               attributes:@{NSForegroundColorAttributeName: [UIColor redColor]}];
-    } else {
-        // 正常消息一出现，立刻存进保险箱备用
-        [g_attrTextCache setObject:orig forKey:key];
-        return orig;
-    }
-}
-
-// 2. 拦截纯文本渲染（逻辑同上）
-- (NSString *)text {
-    NSString *orig = %orig;
-    if (!orig) return orig;
-    
-    NSString *key = safeKey(self);
-    if (!key) return orig;
-
-    if ([orig containsString:@"撤回了一条消息"]) {
-        NSString *cached = [g_textCache objectForKey:key];
-        if (cached) {
-            return [cached stringByAppendingString:@" [已拦截对方撤回]"];
-        }
-        return @"[已拦截对方撤回消息]";
-    } else {
-        [g_textCache setObject:orig forKey:key];
-        return orig;
-    }
-}
-
-%end
-
-// ==========================================
-// 拦截 UI 刷新逻辑，强行触发替换
-// ==========================================
-%hook WWKConversationNewViewController
-
-- (void)revokeMessage:(id)arg1 {
-    UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
-}
-- (void)revokeHistoryMessage:(id)arg1 {
-    UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
-}
-- (void)managerRevokeMessage:(id)arg1 {
-    UITableView *tv = [(id)self valueForKey:@"tableView"];
-    if ([tv isKindOfClass:[UITableView class]]) [tv reloadData];
-}
-
-// 让顶部的恶心弹窗闭嘴
-- (void)revokeMessageWithFirstAlert:(id)arg1 {}
-
-%end
-
-// 顺手保护一下被引用的消息
-%hook WWKConversationQuoteBubbleView
-- (BOOL)quotedRevoked { return NO; }
 %end
