@@ -16,13 +16,9 @@
 - (id)p_parseRevokeMessage:(id)arg1 {
     NSLog(@"[AntiRevoke] 拦截到底层撤回解析包");
     
-    // 绝对不能 return nil！否则进群拉取消息时，数组插入 nil 会瞬间闪退。
-    // 我们不调用 %orig，从而成功阻断撤回指令写入数据库。
-    // 直接返回 self（它是一个刚创建好的合法空消息对象），骗过系统数组！
-    
-    // 保险起见，将其伪装成一条“未知/普通”消息
-    if ([self respondsToSelector:@selector(setIsUnknownMsg:)]) {
-        [self performSelector:@selector(setIsUnknownMsg:) withObject:@(YES)];
+    // 加上 (id) 强转，解决“前向声明”编译报错
+    if ([(id)self respondsToSelector:@selector(setIsUnknownMsg:)]) {
+        [(id)self performSelector:@selector(setIsUnknownMsg:) withObject:@(YES)];
     }
     
     return self; 
@@ -30,7 +26,7 @@
 
 %end
 
-// 2. 强行屏蔽聊天视图控制器的撤回刷新逻辑（保持你的原样）
+// 2. 强行屏蔽聊天视图控制器的撤回刷新逻辑
 %hook WWKConversationNewViewController
 
 - (void)managerRevokeMessage:(id)arg1 {}
@@ -45,8 +41,7 @@
 
 - (void)setAttributedText:(NSAttributedString *)text {
     if (text && [text.string containsString:@"撤回了一条消息"]) {
-        // 不能直接 return 丢弃！UILabel 必须有内容支撑高度，否则计算为0会引发约束冲突闪退。
-        // 我们把它替换成红色的安全提示语，这样你就能知道对方撤回了什么！
+        // 替换成红色的安全提示语，防止高度为0导致闪退
         NSAttributedString *safeText = [[NSAttributedString alloc] initWithString:@" [已拦截对方撤回]" 
                                                                        attributes:@{NSForegroundColorAttributeName: [UIColor redColor]}];
         %orig(safeText);
