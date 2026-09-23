@@ -1,146 +1,86 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// 声明底层接口，消除编译器的“未识别选择器”错误
-@interface WWKMessage : NSObject
-- (id)cleanItemConversationKey;
-@end
-
 // ==========================================
-// 全局会话回溯中心：按会话记录最近消息文本
+// 全局纯内存防崩溃流水账
 // ==========================================
-@interface WWKRevokeMemoryCenter : NSObject
-+ (void)recordMessage:(NSString *)text inConv:(NSString *)convKey;
-+ (NSString *)popLatestMessageInConv:(NSString *)convKey;
-@end
+static NSMutableArray<NSString *> *s_globalMessagePool = nil;
 
-@implementation WWKRevokeMemoryCenter
+static void recordRawText(NSString *str) {
+    if (!str || str.length == 0) return;
+    if ([str containsString:@"撤回了一条消息"]) return;
 
-static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStacks = nil;
-
-+ (void)initialize {
-    if (self == [WWKRevokeMemoryCenter class]) {
-        s_convStacks = [[NSMutableDictionary alloc] init];
+    if (!s_globalMessagePool) {
+        s_globalMessagePool = [[NSMutableArray alloc] initWithCapacity:50];
     }
-}
-
-+ (void)recordMessage:(NSString *)text inConv:(NSString *)convKey {
-    if (!text || text.length == 0 || !convKey) return;
-    if ([text containsString:@"撤回了一条消息"]) return;
-
-    @synchronized (s_convStacks) {
-        NSMutableArray *list = s_convStacks[convKey];
-        if (!list) {
-            list = [NSMutableArray array];
-            s_convStacks[convKey] = list;
-        }
-        // 记录最新消息，最多保留最近 20 条，防止内存膨胀
-        [list addObject:text];
-        if (list.count > 20) {
-            [list removeObjectAtIndex:0];
+    @synchronized (s_globalMessagePool) {
+        // 避免重复存入相同文本
+        if (![s_globalMessagePool.lastObject isEqualToString:str]) {
+            [s_globalMessagePool addObject:str];
+            if (s_globalMessagePool.count > 50) {
+                [s_globalMessagePool removeObjectAtIndex:0];
+            }
         }
     }
 }
 
-+ (NSString *)popLatestMessageInConv:(NSString *)convKey {
-    if (!convKey) return nil;
-    @synchronized (s_convStacks) {
-        NSMutableArray *list = s_convStacks[convKey];
-        if (list && list.count > 0) {
-            return [list lastObject];
+static NSString *getLatestRevokedBackup(void) {
+    if (!s_globalMessagePool) return nil;
+    @synchronized (s_globalMessagePool) {
+        if (s_globalMessagePool.count > 0) {
+            return s_globalMessagePool.lastObject;
         }
     }
     return nil;
 }
 
-@end
-
 // ==========================================
-// 1. 核心模型层：拦截解析、阻止作废、还原内容
+// 1. 核心模型层：100% 安全读取，不使用任何 KVC
 // ==========================================
 %hook WWKMessage
 
-// 阻止底层将消息标记为“作废/不可见”
-- (BOOL)wwkfs_isInvalidateMessage {
-    return NO;
-}
-
-// 拦截撤回数据包解析：保证调用 %orig 彻底杜绝崩溃，同时抓取撤回前的数据
-- (id)p_parseRevokeMessage:(id)arg1 {
-    NSString *beforeText = nil;
-    if ([(id)self respondsToSelector:@selector(text)]) {
-        beforeText = [(id)self text];
-    }
-    
-    // 正常放行解析，维持底层数组结构的绝对完整
-    id res = %orig(arg1);
-    
-    if (beforeText && beforeText.length > 0 && ![beforeText containsString:@"撤回了一条消息"]) {
-        objc_setAssociatedObject(self, "kPreRevokeContent", [beforeText copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return res;
-}
-
-// 拦截纯文本读取
+// 拦截纯文本
 - (NSString *)text {
     NSString *orig = %orig;
-    
-    // 改用 valueForKey 安全提取，彻底杜绝编译报错
-    id convId = [(id)self valueForKey:@"cleanItemConversationKey"];
-    NSString *convKey = convId ? [NSString stringWithFormat:@"%@", convId] : @"default";
+    if (!orig || orig.length == 0) return orig;
 
-    // 正常消息：自动归档到该会话的流水账中
-    if (orig && orig.length > 0 && ![orig containsString:@"撤回了一条消息"]) {
-        [WWKRevokeMemoryCenter recordMessage:orig inConv:convKey];
+    // 正常文本：安全归档
+    if (![orig containsString:@"撤回了一条消息"]) {
+        recordRawText(orig);
         return orig;
     }
 
-    // 遇到已被撤回的消息：提取原文还原
-    if (orig && [orig containsString:@"撤回了一条消息"]) {
-        NSString *saved = objc_getAssociatedObject(self, "kPreRevokeContent");
-        if (!saved || saved.length == 0) {
-            saved = [WWKRevokeMemoryCenter popLatestMessageInConv:convKey];
-        }
-        
-        if (saved && saved.length > 0) {
-            return [NSString stringWithFormat:@"%@  [对方已撤回]", saved];
-        }
+    // 撤回文本：提取上一条正常文字还魂
+    NSString *backup = getLatestRevokedBackup();
+    if (backup && backup.length > 0) {
+        return [NSString stringWithFormat:@"%@  [对方已撤回]", backup];
     }
     return orig;
 }
 
-// 拦截富文本读取（UI 渲染气泡核心）
+// 拦截富文本（UI气泡实际绘制入口）
 - (NSAttributedString *)attrText {
     NSAttributedString *orig = %orig;
-    if (!orig || orig.length == 0) return orig;
+    if (!orig || orig.string.length == 0) return orig;
 
-    id convId = [(id)self valueForKey:@"cleanItemConversationKey"];
-    NSString *convKey = convId ? [NSString stringWithFormat:@"%@", convId] : @"default";
-
-    // 正常富文本消息入库
+    // 正常富文本
     if (![orig.string containsString:@"撤回了一条消息"]) {
-        [WWKRevokeMemoryCenter recordMessage:orig.string inConv:convKey];
+        recordRawText(orig.string);
         return orig;
     }
 
     // 还原被撤回的富文本展示
-    if ([orig.string containsString:@"撤回了一条消息"]) {
-        NSString *saved = objc_getAssociatedObject(self, "kPreRevokeContent");
-        if (!saved || saved.length == 0) {
-            saved = [WWKRevokeMemoryCenter popLatestMessageInConv:convKey];
-        }
-
-        if (saved && saved.length > 0) {
-            NSMutableAttributedString *mut = [[NSMutableAttributedString alloc] initWithString:saved];
-            // 采用克制、自然的灰色系统样式提示
-            NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@"  [对方已撤回]" 
-                                                                      attributes:@{
-                                                                          NSForegroundColorAttributeName: [UIColor lightGrayColor],
-                                                                          NSFontAttributeName: [UIFont systemFontOfSize:12]
-                                                                      }];
-            [mut appendAttributedString:tag];
-            return mut;
-        }
+    NSString *backup = getLatestRevokedBackup();
+    if (backup && backup.length > 0) {
+        NSMutableAttributedString *mut = [[NSMutableAttributedString alloc] initWithString:backup];
+        // 采用克制、自然的灰色系统样式提示
+        NSAttributedString *tag = [[NSAttributedString alloc] initWithString:@"  [对方已撤回]" 
+                                                                  attributes:@{
+                                                                      NSForegroundColorAttributeName: [UIColor lightGrayColor],
+                                                                      NSFontAttributeName: [UIFont systemFontOfSize:12]
+                                                                  }];
+        [mut appendAttributedString:tag];
+        return mut;
     }
     return orig;
 }
@@ -148,15 +88,13 @@ static NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *s_convStac
 %end
 
 // ==========================================
-// 2. 界面控制与引用保护
+// 2. 界面控制与引用安全保护
 // ==========================================
 %hook WWKConversationNewViewController
-// 屏蔽顶部的撤回弹窗警告
 - (void)revokeMessageWithFirstAlert:(id)arg1 {}
 %end
 
 %hook WWKConversationQuoteBubbleView
-// 保护引用框不随撤回而破碎
 - (BOOL)quotedRevoked {
     return NO;
 }
